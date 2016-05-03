@@ -25,6 +25,7 @@ process_log() {
 	./bin_to_txt.pl "$1" "$2" || exit $?
 	echo -e "$3\n" > "$2.processed"
 	cat "$(filter $2)" >> "$2.processed"
+	cp "$1" "$4/" || exit $?
 }
 
 join_and_run_meld() {
@@ -42,7 +43,10 @@ join_and_run_meld() {
 
 run_test_on_remote() {
 	cp "$1/test.mp4" "$REMOTE_ROOT/data/media/" || exit $?
+	adb logcat -c
 	adb shell stagefright -r -t "/data/media/test.mp4" 1>&2
+	adb logcat -d > "$1/logcat.txt"
+	cp "$REMOTE_ROOT/storage/sdcard0/out.jpg" "$1/"
 }
 
 collect_trace_log() {
@@ -54,7 +58,7 @@ collect_trace_log() {
 
 	run_test_on_remote "$1"
 
-	dbus-send --print-reply=literal --dest=org.traceviewer / org.traceviewer.control.recordingFilePath || exit $?
+	dbus-send --print-reply=literal --dest=org.traceviewer / org.traceviewer.control.recordingFilePath | sed -e 's/^[[:space:]]*//' || exit $?
 
 	dbus-send --type=method_call --dest=org.traceviewer / org.traceviewer.control.stopRecordingCPU || exit $?
 	dbus-send --type=method_call --dest=org.traceviewer / org.traceviewer.control.stopRecordingAVP || exit $?
@@ -65,13 +69,13 @@ collect_trace_log() {
 generate_test_file() {
 	echo "$2" > "$1/params.txt"
 	./h264_test_generator -o "$1/test.h264" -d "$1" $2 || exit $?
-	ffmpeg -r 5 -i "$1/test.h264" -vcodec copy -y "$1/test.mp4" || exit $?
+	ffmpeg -loglevel debug -r 5 -i "$1/test.h264" -vcodec copy -y "$1/test.mp4" || exit $?
 	mpv --speed=10 "$1/test.mp4" || exit $?
 }
 
 run_it() {
 	generate_test_file "$1" "$2"
-	process_log "$(collect_trace_log "$1")" "$1/io_trace$3.txt" "$2"
+	process_log "$(collect_trace_log "$1")" "$1/io_trace$3.txt" "$2" "$1"
 }
 
 run_test() {
@@ -88,4 +92,5 @@ prepare
 #	run_test "--abc=e"
 
 join_and_run_meld
+
 cleanup

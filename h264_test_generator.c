@@ -17,6 +17,7 @@
 
 #include <assert.h>
 #include <getopt.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -34,11 +35,17 @@
 
 #define MAX(a, b)	(((a) > (b)) ? (a) : (b))
 
+#define P	0
+#define B	1
+#define I	2
+#define SP	3
+#define SI	4
+
 static bitstream_writer writer;
 static const char *h264_out_file_path;
 static const char *misc_out_dir;
 
-static int stop_bit = 1;
+static const int stop_bit = 1;
 
 /* Sequence parameter set (SPS) */
 static int SPS_profile_idc = 77;
@@ -76,7 +83,7 @@ static int SPS_vui_parameters_present_flag = 0;
 static int PPS_pic_parameter_set_id = 0;
 static int PPS_seq_parameter_set_id = 0;
 static int PPS_entropy_coding_mode_flag = 0;
-static int PPS_bottom_field_pic_order_in_frame_present_flag = 1;
+static int PPS_bottom_field_pic_order_in_frame_present_flag = 0;
 static int PPS_num_slice_groups_minus1 = 0;
 static int PPS_num_ref_idx_l0_default_active_minus1 = 0;
 static int PPS_num_ref_idx_l1_default_active_minus1 = 0;
@@ -89,58 +96,131 @@ static int PPS_deblocking_filter_control_present_flag = 1;
 static int PPS_constrained_intra_pred_flag = 0;
 static int PPS_redundant_pic_cnt_present_flag = 0;
 
-/* Slice layer without partitioning IDR */
-static int SH_first_mb_in_slice = 0;
-static int SH_slice_type = 7; // I_ONLY
-static int SH_pic_parameter_set_id = 0;
-static int SH_frame_num = 0;
-static int SH_idr_pic_id = 0;
-static int SH_no_output_of_prior_pics_flag = 0;
-static int SH_long_term_reference_flag = 0;
-static int SH_slice_qp_delta = 7;
-static int SH_disable_deblocking_filter_idc = 0;
-static int SH_slice_alpha_c0_offset_div2 = 0;
-static int SH_slice_beta_offset_div2 = 0;
+struct slice_header {
+	int slice_type;
+	int first_mb_in_slice;
+	int pic_parameter_set_id;
+	int frame_num;
+	int is_idr;
+	int idr_pic_id;
+	int field_pic_flag;
+	int bottom_field_flag;
+	int no_output_of_prior_pics_flag;
+	int long_term_reference_flag;
+	int adaptive_ref_pic_marking_mode_flag;
+	int slice_qp_delta;
+	int disable_deblocking_filter_idc;
+	int slice_alpha_c0_offset_div2;
+	int slice_beta_offset_div2;
+	int num_ref_idx_active_override_flag;
+	int ref_pic_list_modification_flag_l0;
+};
 
-static char * misc_path(const char *name)
+static struct slice_header **slice_headers;
+static int slices_NB;
+
+static int REF_IDC = 1;
+
+static char * misc_path(const char *name_fmt, ...)
 {
-	char *fpath = malloc(strlen(misc_out_dir) + strlen(name) + 2);
-	assert(fpath != NULL);
-	sprintf(fpath, "%s/%s", misc_out_dir, name);
+	static char fpath[256];
+	char name_formated[64];
+	va_list args;
+
+	if (misc_out_dir == NULL) {
+		return NULL;
+	}
+
+	va_start(args, name_fmt);
+	assert(vsnprintf(name_formated, 64, name_fmt, args) > 0);
+	va_end(args);
+
+	snprintf(fpath, 256, "%s/%s", misc_out_dir, name_formated);
+
 	return fpath;
 }
 
-static FILE * open_misc_file(char *name)
+static FILE * open_file(const char *fpath)
 {
-	char *fpath = misc_path(name);
-	FILE *f = fopen(fpath, "a+");
-	assert(ferror(f) == 0);
-	free(fpath);
+	FILE *f;
+
+	if (fpath == NULL) {
+		return NULL;
+	}
+
+	f = fopen(fpath, "a+");
+	if (f == NULL) {
+		perror(fpath);
+	}
+
 	return f;
 }
 
 static void write_ui(FILE *f, const char *param, unsigned val, int size)
 {
 	bitstream_write_ui(&writer, val, size);
+
+	if (f == NULL) {
+		return;
+	}
+
 	fprintf(f, "%s = %u\n", param, val);
+
+	if (ferror(f) != 0) {
+		perror("");
+	}
+
+	assert(ferror(f) == 0);
 }
 
 static void write_ue(FILE *f, const char *param, unsigned val)
 {
 	bitstream_write_ue(&writer, val);
+
+	if (f == NULL) {
+		return;
+	}
+
 	fprintf(f, "%s = %u\n", param, val);
+
+	if (ferror(f) != 0) {
+		perror("");
+	}
+
+	assert(ferror(f) == 0);
 }
 
 static void write_se(FILE *f, const char *param, signed val)
 {
 	bitstream_write_se(&writer, val);
+
+	if (f == NULL) {
+		return;
+	}
+
 	fprintf(f, "%s = %d\n", param, val);
+
+	if (ferror(f) != 0) {
+		perror("");
+	}
+
+	assert(ferror(f) == 0);
 }
 
 static void write_bitstream_to_file(const char *path, unsigned data_offset,
 				    unsigned data_size)
 {
-	FILE *fp_out = fopen(path, "w+");
+	FILE *fp_out;
+
+	if (path == NULL) {
+		return;
+	}
+
+	fp_out = fopen(path, "w+");
+	if (fp_out == NULL) {
+		perror(path);
+	}
+
 	assert(fp_out != NULL);
 	fwrite(writer.data_ptr + data_offset, 1, data_size, fp_out);
 	assert(ferror(fp_out) == 0);
@@ -148,8 +228,10 @@ static void write_bitstream_to_file(const char *path, unsigned data_offset,
 
 static void generate_NAL_header(int nal_ref_idc, int nal_unit_type)
 {
-	bitstream_write_u_ne(&writer, 0, 8 - writer.bit_shift); // byte align
-	bitstream_write_u_ne(&writer, 0x000001, 24); // NAL start code
+	if (writer.bit_shift != 0) { // byte align
+		bitstream_write_u_ne(&writer, 0, 8 - writer.bit_shift);
+	}
+	bitstream_write_u_ne(&writer, 0x00000001, 32); // NAL start code
 	bitstream_write_u_ne(&writer, 0, 1); // forbidden zero bit = 0
 	bitstream_write_u_ne(&writer, nal_ref_idc, 2);
 	bitstream_write_u_ne(&writer, nal_unit_type, 5);
@@ -157,12 +239,12 @@ static void generate_NAL_header(int nal_ref_idc, int nal_unit_type)
 
 static void generate_SPS(void)
 {
-	FILE *f = open_misc_file("SPS.txt");
+	FILE *f = open_file( misc_path("SPS.txt") );
 	uint32_t data_cnt_old = writer.data_cnt;
 	int reserved_zero_2bits = 0;
 	int i;
 
-	generate_NAL_header(1, 7);
+	generate_NAL_header(REF_IDC, 7);
 
 	WRITE_UI(f, SPS_profile_idc, 8);
 	WRITE_UI(f, SPS_constraint_set0_flag, 1);
@@ -216,7 +298,9 @@ static void generate_SPS(void)
 	WRITE_UI(f, SPS_vui_parameters_present_flag, 1);
 	WRITE_UI(f, stop_bit, 1);
 
-	fclose(f);
+	if (f) {
+		fclose(f);
+	}
 
 	write_bitstream_to_file(misc_path("SPS.data"), data_cnt_old,
 				writer.data_cnt - data_cnt_old + 1);
@@ -224,10 +308,10 @@ static void generate_SPS(void)
 
 static void generate_PPS(void)
 {
-	FILE *f = open_misc_file("PPS.txt");
+	FILE *f = open_file( misc_path("PPS.txt") );
 	uint32_t data_cnt_old = writer.data_cnt;
 
-	generate_NAL_header(1, 8);
+	generate_NAL_header(REF_IDC, 8);
 
 	WRITE_UE(f, PPS_pic_parameter_set_id);
 	WRITE_UE(f, PPS_seq_parameter_set_id);
@@ -246,7 +330,9 @@ static void generate_PPS(void)
 	WRITE_UI(f, PPS_redundant_pic_cnt_present_flag, 1);
 	WRITE_UI(f, stop_bit, 1);
 
-	fclose(f);
+	if (f) {
+		fclose(f);
+	}
 
 	write_bitstream_to_file(misc_path("PPS.data"), data_cnt_old,
 				writer.data_cnt - data_cnt_old + 1);
@@ -257,45 +343,113 @@ static void generate_dummy_macroblock(FILE *f)
 	WRITE_UI(f, DUMMY_MACROBLOCK, 8);
 }
 
-static void generate_IDR_slice(void)
+static void generate_slice(struct slice_header *sh, int slice_id)
 {
-	FILE *f = open_misc_file("slice.txt");
+	FILE *f = open_file( misc_path("slice_%d.txt", slice_id) );
+	int pic_height = SPS_pic_height_in_map_units * (2 - SPS_frame_mbs_only_flag);
+	uint32_t data_cnt_old = writer.data_cnt;
+	int slice_type = sh->slice_type;
+	int mb_skip_run;
 	int x, y;
 
-	generate_NAL_header(1, 5);
+	generate_NAL_header(REF_IDC, sh->is_idr ? 5 : 1);
 
-	WRITE_UE(f, SH_first_mb_in_slice);
-	WRITE_UE(f, SH_slice_type);
-	WRITE_UE(f, SH_pic_parameter_set_id);
-	WRITE_UI(f, SH_frame_num++, SPS_log2_max_frame_num_minus4 + 4);
-	WRITE_UE(f, SH_idr_pic_id);
-	WRITE_UI(f, SH_no_output_of_prior_pics_flag, 1);
-	WRITE_UI(f, SH_long_term_reference_flag, 1);
-	WRITE_SE(f, SH_slice_qp_delta);
+	WRITE_UE(f, sh->first_mb_in_slice);
+	WRITE_UE(f, sh->slice_type);
+	WRITE_UE(f, sh->pic_parameter_set_id);
+	WRITE_UI(f, sh->frame_num, SPS_log2_max_frame_num_minus4 + 4);
 
-	if (PPS_deblocking_filter_control_present_flag) {
-		WRITE_UE(f, SH_disable_deblocking_filter_idc);
+	slice_type %= 5;
 
-		if (SH_disable_deblocking_filter_idc != 1) {
-			WRITE_SE(f, SH_slice_alpha_c0_offset_div2);
-			WRITE_SE(f, SH_slice_beta_offset_div2);
+	if (sh->is_idr) {
+		assert(slice_type == 2);
+		WRITE_UE(f, sh->idr_pic_id);
+	}
+
+	if (slice_type == P) {
+		WRITE_UI(f, sh->num_ref_idx_active_override_flag, 1);
+
+// 		if (sh->num_ref_idx_active_override_flag) {
+// 			WRITE_UE(f, num_ref_idx_l0_active_minus1);
+// 		}
+	}
+
+	if (slice_type != 2 && slice_type != 4) {
+		WRITE_UI(f, sh->ref_pic_list_modification_flag_l0, 1);
+
+// 		if (ref_pic_list_modification_flag_l0) {
+// 			do {
+// 				WRITE_UI(f, modification_of_pic_nums_idc, 1);
+//
+// 				if (modification_of_pic_nums_idc == 0 ||
+// 					modification_of_pic_nums_idc == 1)
+// 				{
+// 					abs_diff_pic_num_minus1
+// 				} else if (modification_of_pic_nums_idc == 2) {
+// 					long_term_pic_num
+// 				}
+// 			} while (modification_of_pic_nums_idc != 3);
+// 		}
+	}
+
+	if (!SPS_frame_mbs_only_flag) {
+		WRITE_UI(f, sh->field_pic_flag, 1);
+
+		if (sh->field_pic_flag) {
+			WRITE_UI(f, sh->bottom_field_flag, 1);
 		}
 	}
 
-	for (y = 0; y < SPS_pic_height_in_map_units; y++) {
-		for (x = 0; x < SPS_pic_width_in_mbs; x++) {
-			generate_dummy_macroblock(f);
+	if (REF_IDC != 0) {
+		if (sh->is_idr) {
+			WRITE_UI(f, sh->no_output_of_prior_pics_flag, 1);
+			WRITE_UI(f, sh->long_term_reference_flag, 1);
+		} else {
+			WRITE_UI(f, sh->adaptive_ref_pic_marking_mode_flag, 1);
 		}
+	}
+
+	WRITE_SE(f, sh->slice_qp_delta);
+
+	if (PPS_deblocking_filter_control_present_flag) {
+		WRITE_UE(f, sh->disable_deblocking_filter_idc);
+
+		if (sh->disable_deblocking_filter_idc != 1) {
+			WRITE_SE(f, sh->slice_alpha_c0_offset_div2);
+			WRITE_SE(f, sh->slice_beta_offset_div2);
+		}
+	}
+
+	switch (slice_type) {
+	case I:
+		for (y = 0; y < pic_height; y++) {
+			for (x = 0; x < SPS_pic_width_in_mbs; x++) {
+				generate_dummy_macroblock(f);
+			}
+		}
+		break;
+	case P:
+		mb_skip_run = SPS_pic_width_in_mbs * pic_height;
+		WRITE_UE(f, mb_skip_run);
+		break;
+	default:
+		assert(0);
 	}
 
 	WRITE_UI(f, stop_bit, 1);
 
-	fclose(f);
+	if (f) {
+		fclose(f);
+	}
+
+	write_bitstream_to_file(misc_path("slice_%d.data", slice_id),
+			data_cnt_old, writer.data_cnt - data_cnt_old + 1);
 }
 
 static void generate_h264(void)
 {
-	int frames_nb = 30;
+	int frames_nb = slices_NB;
+	int i;
 
 	if (SPS_log2_max_frame_num_minus4 == -1) {
 		SPS_log2_max_frame_num_minus4 = MAX(28 - clz(frames_nb), 0);
@@ -304,9 +458,116 @@ static void generate_h264(void)
 	generate_SPS();
 	generate_PPS();
 
-	while (frames_nb--) {
-		generate_IDR_slice();
+	for (i = 0; i < slices_NB; i++) {
+		generate_slice(slice_headers[i], i);
 	}
+
+	generate_NAL_header(REF_IDC, 11); // End of stream
+}
+
+static void parse_sh_params(void)
+{
+	struct slice_header *sh = calloc(1, sizeof(*sh));
+
+	enum {
+		SLICE_TYPE,
+		FIRST_MB_IN_SLICE,
+		PIC_PARAMETER_SET_ID,
+		FRAME_NUM,
+		IS_IDR,
+		IDR_PIC_ID,
+		FIELD_PIC_FLAG,
+		BOTTOM_FIELD_FLAG,
+		NO_OUTPUT_OF_PRIOR_PICS_FLAG,
+		LONG_TERM_REFERENCE_FLAG,
+		SLICE_QP_DELTA,
+		DISABLE_DEBLOCKING_FILTER_IDC,
+		SLICE_ALPHA_C0_OFFSET_DIV2,
+		SLICE_BETA_OFFSET_DIV2,
+		SENTINEL,
+	};
+
+	char *const params[] = {
+		[SLICE_TYPE]			= "slice_type",
+		[FIRST_MB_IN_SLICE]		= "first_mb_in_slice",
+		[PIC_PARAMETER_SET_ID]		= "pic_parameter_set_id",
+		[FRAME_NUM]			= "frame_num",
+		[IS_IDR]			= "is_idr",
+		[IDR_PIC_ID]			= "idr_pic_id",
+		[FIELD_PIC_FLAG]		= "field_pic_flag",
+		[BOTTOM_FIELD_FLAG]		= "bottom_field_flag",
+		[NO_OUTPUT_OF_PRIOR_PICS_FLAG]	= "no_output_of_prior_pics_flag",
+		[LONG_TERM_REFERENCE_FLAG]	= "long_term_reference_flag",
+		[SLICE_QP_DELTA]		= "slice_qp_delta",
+		[DISABLE_DEBLOCKING_FILTER_IDC]	= "disable_deblocking_filter_idc",
+		[SLICE_ALPHA_C0_OFFSET_DIV2]	= "slice_alpha_c0_offset_div2",
+		[SLICE_BETA_OFFSET_DIV2]	= "slice_beta_offset_div2",
+		[SENTINEL]			= NULL,
+	};
+	char *subopts = optarg, *value;
+
+	assert(sh != NULL);
+
+	while (*subopts != '\0') {
+		int param_id = getsubopt(&subopts, params, &value);
+
+		if (param_id < 0) {
+			printf ("Unknown suboption '%s'\n", value);
+			continue;
+		}
+
+		assert(value != NULL);
+
+		switch (param_id) {
+		case SLICE_TYPE:
+			sh->slice_type = atoi(value);
+			break;
+		case FIRST_MB_IN_SLICE:
+			sh->first_mb_in_slice = atoi(value);
+			break;
+		case PIC_PARAMETER_SET_ID:
+			sh->pic_parameter_set_id = atoi(value);
+			break;
+		case FRAME_NUM:
+			sh->frame_num = atoi(value);
+			break;
+		case IS_IDR:
+			sh->is_idr = atoi(value);
+			break;
+		case IDR_PIC_ID:
+			sh->idr_pic_id = atoi(value);
+			break;
+		case FIELD_PIC_FLAG:
+			sh->field_pic_flag = atoi(value);
+			break;
+		case BOTTOM_FIELD_FLAG:
+			sh->bottom_field_flag = atoi(value);
+			break;
+		case NO_OUTPUT_OF_PRIOR_PICS_FLAG:
+			sh->no_output_of_prior_pics_flag = atoi(value);
+			break;
+		case LONG_TERM_REFERENCE_FLAG:
+			sh->long_term_reference_flag = atoi(value);
+			break;
+		case SLICE_QP_DELTA:
+			sh->slice_qp_delta = atoi(value);
+			break;
+		case DISABLE_DEBLOCKING_FILTER_IDC:
+			sh->disable_deblocking_filter_idc = atoi(value);
+			break;
+		case SLICE_ALPHA_C0_OFFSET_DIV2:
+			sh->slice_alpha_c0_offset_div2 = atoi(value);
+			break;
+		case SLICE_BETA_OFFSET_DIV2:
+			sh->slice_beta_offset_div2 = atoi(value);
+			break;
+		}
+	}
+
+	slice_headers = realloc(slice_headers, ++slices_NB * sizeof(void *));
+	assert(slice_headers != NULL);
+
+	slice_headers[slices_NB - 1] = sh;
 }
 
 static void parse_input_params(int argc, char **argv)
@@ -314,8 +575,9 @@ static void parse_input_params(int argc, char **argv)
 	int c;
 
 	do {
-		static struct option long_options[] =
+		struct option long_options[] =
 		{
+			{"slice",					required_argument, 0, 0},
 			{"SPS_profile_idc",				required_argument, &SPS_profile_idc, 0},
 			{"SPS_constraint_set0_flag",			required_argument, &SPS_constraint_set0_flag, 0},
 			{"SPS_constraint_set1_flag",			required_argument, &SPS_constraint_set1_flag, 0},
@@ -363,17 +625,7 @@ static void parse_input_params(int argc, char **argv)
 			{"PPS_constrained_intra_pred_flag",		required_argument, &PPS_constrained_intra_pred_flag, 0},
 			{"PPS_redundant_pic_cnt_present_flag",		required_argument, &PPS_redundant_pic_cnt_present_flag, 0},
 
-			{"SH_first_mb_in_slice",			required_argument, &SH_first_mb_in_slice, 0},
-			{"SH_slice_type",				required_argument, &SH_slice_type, 0},
-			{"SH_pic_parameter_set_id",			required_argument, &SH_pic_parameter_set_id, 0},
-			{"SH_frame_num",				required_argument, &SH_frame_num, 0},
-			{"SH_idr_pic_id",				required_argument, &SH_idr_pic_id, 0},
-			{"SH_no_output_of_prior_pics_flag",		required_argument, &SH_no_output_of_prior_pics_flag, 0},
-			{"SH_long_term_reference_flag",			required_argument, &SH_long_term_reference_flag, 0},
-			{"SH_slice_qp_delta",				required_argument, &SH_slice_qp_delta, 0},
-			{"SH_disable_deblocking_filter_idc",		required_argument, &SH_disable_deblocking_filter_idc, 0},
-			{"SH_slice_alpha_c0_offset_div2",		required_argument, &SH_slice_alpha_c0_offset_div2, 0},
-			{"SH_slice_beta_offset_div2",			required_argument, &SH_slice_beta_offset_div2, 0},
+			{"REF_IDC",					required_argument, &REF_IDC, 0},
 			{ /* Sentinel */ }
 		};
 		int option_index = 0;
@@ -382,7 +634,11 @@ static void parse_input_params(int argc, char **argv)
 
 		switch (c) {
 		case 0:
-			*long_options[option_index].flag = atoi(optarg);
+			if (option_index == 0) {
+				parse_sh_params();
+			} else {
+				*long_options[option_index].flag = atoi(optarg);
+			}
 			break;
 		case -1:
 			break;
@@ -403,8 +659,7 @@ static void parse_input_params(int argc, char **argv)
 	}
 
 	if (misc_out_dir == NULL) {
-		fprintf(stderr, "-d misc output directory path\n");
-		exit(EXIT_FAILURE);
+		fprintf(stderr, "-d misc output directory path [optional]\n");
 	}
 }
 

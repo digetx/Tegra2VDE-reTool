@@ -59,7 +59,7 @@ static int SPS_level_idc = 31;
 static int SPS_seq_parameter_set_id = 0;
 static int SPS_log2_max_frame_num_minus4 = -1;
 static int SPS_pic_order_cnt_type = 2;
-static int SPS_log2_max_pic_order_cnt_lsb_minus4 = 0;
+static int SPS_log2_max_pic_order_cnt_lsb_minus4 = -1;
 static int SPS_delta_pic_order_always_zero_flag = 0;
 static int SPS_offset_for_non_ref_pic = 0;
 static int SPS_offset_for_top_to_bottom_field = 0;
@@ -71,7 +71,7 @@ static int SPS_pic_width_in_mbs = 6;
 static int SPS_pic_height_in_map_units = 6;
 static int SPS_frame_mbs_only_flag = 1;
 static int SPS_mb_adaptive_frame_field_flag = 0;
-static int SPS_direct_8x8_inference_flag = 1;
+static int SPS_direct_8x8_inference_flag = 0;
 static int SPS_frame_cropping_flag = 0;
 static int SPS_frame_crop_left_offset = 0;
 static int SPS_frame_crop_right_offset = 0;
@@ -89,12 +89,14 @@ static int PPS_num_ref_idx_l0_default_active_minus1 = 0;
 static int PPS_num_ref_idx_l1_default_active_minus1 = 0;
 static int PPS_weighted_pred_flag = 0;
 static int PPS_weighted_bipred_idc = 0;
-static int PPS_pic_init_qp_minus26 = 4;
+static int PPS_pic_init_qp_minus26 = 0;
 static int PPS_pic_init_qs_minus26 = 0;
 static int PPS_chroma_qp_index_offset = 3;
 static int PPS_deblocking_filter_control_present_flag = 1;
 static int PPS_constrained_intra_pred_flag = 0;
 static int PPS_redundant_pic_cnt_present_flag = 0;
+static int PPS_transform_8x8_mode_flag = 0;
+static int PPS_second_chroma_qp_index_offset = 0;
 
 struct slice_header {
 	int slice_type;
@@ -108,16 +110,25 @@ struct slice_header {
 	int no_output_of_prior_pics_flag;
 	int long_term_reference_flag;
 	int adaptive_ref_pic_marking_mode_flag;
+	int cabac_init_idc;
 	int slice_qp_delta;
 	int disable_deblocking_filter_idc;
 	int slice_alpha_c0_offset_div2;
 	int slice_beta_offset_div2;
 	int num_ref_idx_active_override_flag;
+	int num_ref_idx_l0_active_minus1;
+	int num_ref_idx_l1_active_minus1;
 	int ref_pic_list_modification_flag_l0;
+	int ref_pic_list_modification_flag_l1;
+	int direct_spatial_mv_pred_flag;
+	int pic_order_cnt_lsb;
+	int macroblocks_nb;
 };
 
 static struct slice_header **slice_headers;
 static int slices_NB;
+static int max_frame_nb;
+static int max_pic_order_cnt;
 
 static int REF_IDC = 1;
 
@@ -328,6 +339,13 @@ static void generate_PPS(void)
 	WRITE_UI(f, PPS_deblocking_filter_control_present_flag, 1);
 	WRITE_UI(f, PPS_constrained_intra_pred_flag, 1);
 	WRITE_UI(f, PPS_redundant_pic_cnt_present_flag, 1);
+
+	if (PPS_transform_8x8_mode_flag) {
+		WRITE_UI(f, PPS_transform_8x8_mode_flag, 1);
+		WRITE_UI(f, 0/*PPS_pic_scaling_matrix_present_flag*/, 1);
+		WRITE_SE(f, PPS_second_chroma_qp_index_offset);
+	}
+
 	WRITE_UI(f, stop_bit, 1);
 
 	if (f) {
@@ -338,7 +356,7 @@ static void generate_PPS(void)
 				writer.data_cnt - data_cnt_old + 1);
 }
 
-static void generate_dummy_macroblock(FILE *f)
+static void generate_dummy_I_macroblock(FILE *f)
 {
 	WRITE_UI(f, DUMMY_MACROBLOCK, 8);
 }
@@ -349,8 +367,7 @@ static void generate_slice(struct slice_header *sh, int slice_id)
 	int pic_height = SPS_pic_height_in_map_units * (2 - SPS_frame_mbs_only_flag);
 	uint32_t data_cnt_old = writer.data_cnt;
 	int slice_type = sh->slice_type;
-	int mb_skip_run;
-	int x, y;
+	int macroblocks_nb = sh->macroblocks_nb ?: SPS_pic_width_in_mbs * pic_height;
 
 	generate_NAL_header(REF_IDC, sh->is_idr ? 5 : 1);
 
@@ -366,15 +383,28 @@ static void generate_slice(struct slice_header *sh, int slice_id)
 		WRITE_UE(f, sh->idr_pic_id);
 	}
 
-	if (slice_type == P) {
-		WRITE_UI(f, sh->num_ref_idx_active_override_flag, 1);
-
-// 		if (sh->num_ref_idx_active_override_flag) {
-// 			WRITE_UE(f, num_ref_idx_l0_active_minus1);
-// 		}
+	if (SPS_pic_order_cnt_type == 0) {
+		WRITE_UI(f, sh->pic_order_cnt_lsb,
+			 SPS_log2_max_pic_order_cnt_lsb_minus4 + 4);
 	}
 
-	if (slice_type != 2 && slice_type != 4) {
+	if (slice_type == P || slice_type == B) {
+		if (slice_type == B) {
+			WRITE_UI(f, sh->direct_spatial_mv_pred_flag, 1);
+		}
+
+		WRITE_UI(f, sh->num_ref_idx_active_override_flag, 1);
+
+		if (sh->num_ref_idx_active_override_flag) {
+			WRITE_UE(f, sh->num_ref_idx_l0_active_minus1);
+
+			if (slice_type == B) {
+				WRITE_UE(f, sh->num_ref_idx_l1_active_minus1);
+			}
+		}
+	}
+
+	if (slice_type != I && slice_type != SI) {
 		WRITE_UI(f, sh->ref_pic_list_modification_flag_l0, 1);
 
 // 		if (ref_pic_list_modification_flag_l0) {
@@ -390,6 +420,10 @@ static void generate_slice(struct slice_header *sh, int slice_id)
 // 				}
 // 			} while (modification_of_pic_nums_idc != 3);
 // 		}
+
+		if (slice_type == B) {
+			WRITE_UI(f, sh->ref_pic_list_modification_flag_l1, 1);
+		}
 	}
 
 	if (!SPS_frame_mbs_only_flag) {
@@ -409,6 +443,10 @@ static void generate_slice(struct slice_header *sh, int slice_id)
 		}
 	}
 
+	if (slice_type != I && slice_type != SI && PPS_entropy_coding_mode_flag) {
+		WRITE_UE(f, sh->cabac_init_idc);
+	}
+
 	WRITE_SE(f, sh->slice_qp_delta);
 
 	if (PPS_deblocking_filter_control_present_flag) {
@@ -422,15 +460,13 @@ static void generate_slice(struct slice_header *sh, int slice_id)
 
 	switch (slice_type) {
 	case I:
-		for (y = 0; y < pic_height; y++) {
-			for (x = 0; x < SPS_pic_width_in_mbs; x++) {
-				generate_dummy_macroblock(f);
-			}
+		while (macroblocks_nb--) {
+			generate_dummy_I_macroblock(f);
 		}
 		break;
 	case P:
-		mb_skip_run = SPS_pic_width_in_mbs * pic_height;
-		WRITE_UE(f, mb_skip_run);
+	case B:
+		WRITE_UE(f, macroblocks_nb);
 		break;
 	default:
 		assert(0);
@@ -448,11 +484,14 @@ static void generate_slice(struct slice_header *sh, int slice_id)
 
 static void generate_h264(void)
 {
-	int frames_nb = slices_NB;
 	int i;
 
 	if (SPS_log2_max_frame_num_minus4 == -1) {
-		SPS_log2_max_frame_num_minus4 = MAX(28 - clz(frames_nb), 0);
+		SPS_log2_max_frame_num_minus4 = MAX(28 - clz(max_frame_nb), 0);
+	}
+
+	if (SPS_log2_max_pic_order_cnt_lsb_minus4 == -1) {
+		SPS_log2_max_pic_order_cnt_lsb_minus4 = MAX(28 - clz(max_pic_order_cnt), 0);
 	}
 
 	generate_SPS();
@@ -480,10 +519,17 @@ static void parse_sh_params(void)
 		BOTTOM_FIELD_FLAG,
 		NO_OUTPUT_OF_PRIOR_PICS_FLAG,
 		LONG_TERM_REFERENCE_FLAG,
+		CABAC_INIT_IDC,
 		SLICE_QP_DELTA,
 		DISABLE_DEBLOCKING_FILTER_IDC,
 		SLICE_ALPHA_C0_OFFSET_DIV2,
 		SLICE_BETA_OFFSET_DIV2,
+		NUM_REF_IDX_ACTIVE_OVERRIDE_FLAG,
+		NUM_REF_IDX_L0_ACTIVE_MINUS1,
+		NUM_REF_IDX_L1_ACTIVE_MINUS1,
+		DIRECT_SPATIAL_MV_PRED_FLAG,
+		PIC_ORDER_CNT_LSB,
+		MACROBLOCKS_NB,
 		SENTINEL,
 	};
 
@@ -498,10 +544,17 @@ static void parse_sh_params(void)
 		[BOTTOM_FIELD_FLAG]		= "bottom_field_flag",
 		[NO_OUTPUT_OF_PRIOR_PICS_FLAG]	= "no_output_of_prior_pics_flag",
 		[LONG_TERM_REFERENCE_FLAG]	= "long_term_reference_flag",
+		[CABAC_INIT_IDC]		= "cabac_init_idc",
 		[SLICE_QP_DELTA]		= "slice_qp_delta",
 		[DISABLE_DEBLOCKING_FILTER_IDC]	= "disable_deblocking_filter_idc",
 		[SLICE_ALPHA_C0_OFFSET_DIV2]	= "slice_alpha_c0_offset_div2",
 		[SLICE_BETA_OFFSET_DIV2]	= "slice_beta_offset_div2",
+		[NUM_REF_IDX_ACTIVE_OVERRIDE_FLAG] = "num_ref_idx_active_override_flag",
+		[NUM_REF_IDX_L0_ACTIVE_MINUS1]	= "num_ref_idx_l0_active_minus1",
+		[NUM_REF_IDX_L1_ACTIVE_MINUS1]	= "num_ref_idx_l1_active_minus1",
+		[DIRECT_SPATIAL_MV_PRED_FLAG]	= "direct_spatial_mv_pred_flag",
+		[PIC_ORDER_CNT_LSB]		= "pic_order_cnt_lsb",
+		[MACROBLOCKS_NB]		= "macroblocks_nb",
 		[SENTINEL]			= NULL,
 	};
 	char *subopts = optarg, *value;
@@ -539,15 +592,26 @@ static void parse_sh_params(void)
 			break;
 		case FIELD_PIC_FLAG:
 			sh->field_pic_flag = atoi(value);
+			assert(sh->field_pic_flag <= 1);
+			assert(sh->field_pic_flag >= 0);
 			break;
 		case BOTTOM_FIELD_FLAG:
 			sh->bottom_field_flag = atoi(value);
+			assert(sh->bottom_field_flag <= 1);
+			assert(sh->bottom_field_flag >= 0);
 			break;
 		case NO_OUTPUT_OF_PRIOR_PICS_FLAG:
 			sh->no_output_of_prior_pics_flag = atoi(value);
+			assert(sh->no_output_of_prior_pics_flag <= 1);
+			assert(sh->no_output_of_prior_pics_flag >= 0);
 			break;
 		case LONG_TERM_REFERENCE_FLAG:
 			sh->long_term_reference_flag = atoi(value);
+			assert(sh->long_term_reference_flag <= 1);
+			assert(sh->long_term_reference_flag >= 0);
+			break;
+		case CABAC_INIT_IDC:
+			sh->cabac_init_idc = atoi(value);
 			break;
 		case SLICE_QP_DELTA:
 			sh->slice_qp_delta = atoi(value);
@@ -561,6 +625,28 @@ static void parse_sh_params(void)
 		case SLICE_BETA_OFFSET_DIV2:
 			sh->slice_beta_offset_div2 = atoi(value);
 			break;
+		case NUM_REF_IDX_ACTIVE_OVERRIDE_FLAG:
+			sh->num_ref_idx_active_override_flag = atoi(value);
+			assert(sh->num_ref_idx_active_override_flag <= 1);
+			assert(sh->num_ref_idx_active_override_flag >= 0);
+			break;
+		case NUM_REF_IDX_L0_ACTIVE_MINUS1:
+			sh->num_ref_idx_l0_active_minus1 = atoi(value);
+			break;
+		case NUM_REF_IDX_L1_ACTIVE_MINUS1:
+			sh->num_ref_idx_l1_active_minus1 = atoi(value);
+			break;
+		case DIRECT_SPATIAL_MV_PRED_FLAG:
+			sh->direct_spatial_mv_pred_flag = atoi(value);
+			assert(sh->direct_spatial_mv_pred_flag <= 1);
+			assert(sh->direct_spatial_mv_pred_flag >= 0);
+			break;
+		case PIC_ORDER_CNT_LSB:
+			sh->pic_order_cnt_lsb = atoi(value);
+			break;
+		case MACROBLOCKS_NB:
+			sh->macroblocks_nb = atoi(value);
+			break;
 		}
 	}
 
@@ -568,6 +654,9 @@ static void parse_sh_params(void)
 	assert(slice_headers != NULL);
 
 	slice_headers[slices_NB - 1] = sh;
+
+	max_frame_nb = MAX(max_frame_nb, sh->frame_num);
+	max_pic_order_cnt = MAX(max_pic_order_cnt, sh->pic_order_cnt_lsb);
 }
 
 static void parse_input_params(int argc, char **argv)
@@ -624,6 +713,8 @@ static void parse_input_params(int argc, char **argv)
 			{"PPS_deblocking_filter_control_present_flag",	required_argument, &PPS_deblocking_filter_control_present_flag, 0},
 			{"PPS_constrained_intra_pred_flag",		required_argument, &PPS_constrained_intra_pred_flag, 0},
 			{"PPS_redundant_pic_cnt_present_flag",		required_argument, &PPS_redundant_pic_cnt_present_flag, 0},
+			{"PPS_transform_8x8_mode_flag",			required_argument, &PPS_transform_8x8_mode_flag, 0},
+			{"PPS_second_chroma_qp_index_offset",		required_argument, &PPS_second_chroma_qp_index_offset, 0},
 
 			{"REF_IDC",					required_argument, &REF_IDC, 0},
 			{ /* Sentinel */ }
@@ -672,6 +763,8 @@ int main(int argc, char **argv)
 	generate_h264();
 
 	write_bitstream_to_file(h264_out_file_path, 0, writer.data_cnt + 1);
+
+	printf("H.264 bitstream generation completed!\n");
 
 	return 0;
 }

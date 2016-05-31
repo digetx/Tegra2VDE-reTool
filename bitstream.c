@@ -62,7 +62,7 @@ static void bitstream_escape(bitstream_writer *writer)
 		case ESCAPE_2:
 			break;
 		default:
-			assert(0);
+			abort();
 		}
 	case 1 ... 3:
 		if (writer->track_escape_seq == ESCAPE_2) {

@@ -1,5 +1,6 @@
 .*
 *.o
+*.png
 h264_test_generator
 Makefile
 Makefile.in

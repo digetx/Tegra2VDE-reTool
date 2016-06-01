@@ -51,9 +51,13 @@ while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000000\t"INT_VDE_SYN
 
 		if ($z =~ /$fidaddr (0x[0-9A-F]{8})/) {
 			my $mem = $1;
+			my $mfn = $ptags{"fn$mem"};
+			my $rframe = defined($mfn) ? " FRAME #$mfn" : "";
 
-			push @frame_ids, { text => "FRAMEID $FID", port => "<fp$FID>" };
+			push @frame_ids, { text => "FRAMEID $FID -$rframe $mem",
+					   port => "<fp$FID>" };
 			$tags{$mem} = $FID;
+			$tags{"fn$mem"} = $fn if ($FID == 0);
 
 			if ($FID == 0 && $z !~ /$nfidaddr 0x/) {
 				%ptags = ();
@@ -71,7 +75,7 @@ while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000000\t"INT_VDE_SYN
 	}
 
 	while ($z =~ /0x4000(....) (0x[0-9A-F]{8})\t"IRAM"\n.+?0x4000.... (0x[0-9A-F]{8})/g) {
-		push @frame_ids, { text => "IRAM 0x$1: $2 - $3", port => "<iaddr$1>" };
+		push @frame_ids, { text => "IRAM 0x$1: $2 - " . $ptags{$3}, port => "<iaddr$1>" };
 
 		next if (hex($1) >= 0x4070);
 
@@ -80,7 +84,8 @@ while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000000\t"INT_VDE_SYN
 		if (defined($from)) {
 			$graph->add_edge(from => $from,
 					 to => "Frame_$fn:iaddr$1",
-					 style => 'dashed');
+					 style => 'dashed',
+					 color => $colors[$colitr++ % scalar(@colors)]);
 		}
 	}
 

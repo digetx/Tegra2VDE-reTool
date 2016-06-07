@@ -16,6 +16,8 @@ my @colors = (
 	'sienna',
 	'chocolate',
 	'burlywood',
+	'lightslategray',
+	'firebrick',
 	'deeppink',
 	'cyan',
 	'gold',
@@ -27,14 +29,15 @@ my @colors = (
 my $colitr = 0;
 
 my $graph = GraphViz2->new();
+my $gpath = defined($ARGV[1]) ? $ARGV[1] : 'graph.png';
 
 my $fpath = $ARGV[0];
 my $text = read_file($fpath);
 my $fn = 0;
 
-my %ptags = ();
+my %ptags;
 
-while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000000\t"INT_VDE_SYNC_TOKEN")/msg) {
+while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000001\t"INT_VDE_SXE")/msg) {
 	my $z = $1;
 	$z =~ s/.*CLK_RST_CONTROLLER_RST_DEV_H_SET_0"//msg;
 	$z =~ s/ON_AVP: WRITE32:  0x6001B08C 0x00000001	"BSEV Unknown".*//msg;
@@ -66,7 +69,7 @@ while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000000\t"INT_VDE_SYN
 
 			my $p_port = $ptags{$mem};
 
-			if (defined($p_port)) {
+			if ($FID != 0 && defined($p_port)) {
 				$graph->add_edge(from => "Frame_$pfn:fp$p_port",
 						 to => "Frame_$fn:fp$FID",
 						 color => $colors[$colitr++ % scalar(@colors)]);
@@ -75,11 +78,12 @@ while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000000\t"INT_VDE_SYN
 	}
 
 	while ($z =~ /0x4000(....) (0x[0-9A-F]{8})\t"IRAM"\n.+?0x4000.... (0x[0-9A-F]{8})/g) {
-		push @frame_ids, { text => "IRAM 0x$1: $2 - " . $ptags{$3}, port => "<iaddr$1>" };
+		my $from = $ptags{$3};
+
+		push @frame_ids, { text => "IRAM 0x$1: $2 - " . (defined($from) ? $from : "??? $3"),
+				   port => "<iaddr$1>" };
 
 		next if (hex($1) >= 0x4070);
-
-		my $from = $ptags{$3};
 
 		if (defined($from)) {
 			$graph->add_edge(from => $from,
@@ -90,6 +94,7 @@ while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000000\t"INT_VDE_SYN
 	}
 
 	my ($MBE_out_enb) = ($z =~ /0x6001C080 0xFC0000([0-9A-F]{2})/);
+	die("No 0xFC0000xx!!! Frame #$fn\n") if (!defined($MBE_out_enb));
 
 	foreach my $MBE_reg (0 .. 4) {
 		my $rlow = $MBE_reg * 2;
@@ -109,6 +114,16 @@ while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000000\t"INT_VDE_SYN
 		}
 	}
 
+	while ($z =~ /0x6001C080 (0xD[0-9A-F]{7})/g) {
+		push @frame_ids, { text => "$1" };
+	}
+
+	if ($z =~ /0x6001C080 (0x3[0-9A-F]{7})/) {
+		push @frame_ids, { text => $1 };
+	}
+
+	push @frame_ids, { text => "0xFC0000$MBE_out_enb" };
+
 	$frame_ids[-1]{text} = $frame_ids[-1]{text} . '}';
 
 	$graph->add_node(name => "Frame_$fn",
@@ -120,4 +135,4 @@ while ($text =~ /CLK_RST_CONTROLLER_RST_DEV_H_SET_0"(.+?0x00000000\t"INT_VDE_SYN
 	$fn++;
 }
 
-$graph->run(format => 'png', output_file => 'graph.png');
+$graph->run(format => 'png', output_file => $gpath);

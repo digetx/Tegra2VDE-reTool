@@ -30,6 +30,8 @@ process_log() {
 
 	perl -pe 's/^<\d>\[[ \d]+\.[\d ]+\] //g' "$4/dmesg.txt" >> "$4/dmesg.cleaned.txt"
 	./split.pl "$4/dmesg.cleaned.txt"
+
+	./mk_graph.pl "$2.processed" "$4/graph.png"
 }
 
 join_and_show_diff() {
